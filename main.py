@@ -2,16 +2,17 @@ import dominate
 import imagehash
 import os
 import sys
+import time
 
 from PIL import Image, ImageFile
-from datetime import datetime
+from datetime import datetime, timedelta
 from dominate.tags import *
 from dominate.util import raw
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 HASHING_ALGORITHM = imagehash.average_hash
-HASH_SIZE = 48
-THRESHOLD = 25
+HASH_SIZE = 32
+THRESHOLD = 10
 
 
 class HashedImage:
@@ -53,6 +54,39 @@ class HashedImage:
         return self._width
 
 
+def print_usage():
+    print('Image comparer - compares all images in provided folders to find duplicates')
+    print('    python image-comparer.py path_to_folder [path_to_folder ...]')
+
+
+def render_image(image: HashedImage):
+    with tr():
+        # Image
+        if image.height > image.width:
+            image_class = 'fixedHeight'
+        else:
+            image_class = 'fixedWidth'
+
+        src = image.path.replace('\\', '/')
+        if not src.startswith('/'):
+            src = f'/{src}'
+        src = f'file://{src}'
+
+        td(img(src=src, className=image_class), className='imgtd')
+
+        # Modified date
+        last_modified = datetime.fromtimestamp(image.last_modified).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Path/Hash
+        with td():
+            p(image.path)
+            p(f'{image.width} x {image.height}, {last_modified}')
+
+        # Delete button
+        escaped_path = image.path.replace('\\', '&#92;')
+        td(button("Delete", onClick=f'addFile(\'{escaped_path}\', this);'), className='buttontd')
+
+
 def main():
     if len(sys.argv) < 2:
         print_usage()
@@ -72,9 +106,10 @@ def main():
 
     # Step 2: Discover images and calculate hashes
     print()
-    print('Discovering images', end='')
+    print('--- Discovering Images', end='')
+    discovery_start = time.time()
 
-    images = {}
+    images = []
     invalid_paths = []
     images_discovered = 0
     for folder_path in folder_path_list:
@@ -82,43 +117,75 @@ def main():
             for file in files:
                 image_path = os.path.join(root, file)
                 try:
+                    # Add image to bucket of images
                     image = HashedImage(image_path)
-                    images[image] = []
-                except:
-                    invalid_paths.append(image_path)
+                    images.append(image)
 
-                # Show progress
-                images_discovered += 1
-                if images_discovered % 10 == 0:
-                    print('.', end='')
+                    # Show progress
+                    images_discovered += 1
+                    if images_discovered  % 100 == 0:
+                        print('.', end='')
+
+                except Exception as e:
+                    if hasattr(e, 'message'):
+                        invalid_paths.append(f"{image_path} : {e.message}")
+                    else:
+                        invalid_paths.append(f"{image_path} : {e}")
+
+    discovery_end = time.time()
+    print()
+    print(f"--! Discovered Images: {images_discovered}, {str(timedelta(seconds=round(discovery_end - discovery_start, 3)))}")
 
     # Step 3: Find similar files based on hash
-    print()
-    print('Finding similar files', end='')
+    print('--- Comparing Images', end='')
+    comparison_start = time.time()
 
-    images_processed = 0
-    for image_a in images.keys():
-        for image_b in images.keys():
+    comparisons_made = 0
+    image_buckets = []
+    while len(images) > 0:
+        # Pull image off top of stack and create bucket for similar images
+        image_a = images.pop()
+        image_bucket = []
+
+        # Compare with all the images
+        for image_b in images:
             # Don't compare the image to itself
             if image_a == image_b:
                 continue
 
+            # Compute the difference
             hash_difference = image_a.hash - image_b.hash
             if hash_difference <= THRESHOLD:
-                images[image_a].append((image_b, hash_difference))
+                image_bucket.append(image_b)
 
-        # Show progress
-        images_processed += 1
-        if images_processed % 10 == 0:
-            print('.', end='')
+            # Show progress
+            comparisons_made += 1
+            if comparisons_made % 10000 == 0:
+                print('.', end='')
+
+        # Remove bucket from the image set
+        for image in image_bucket:
+            images.remove(image)
+
+        # Add the first image back to its bucket
+        image_bucket.append(image_a)
+
+        # Add bucket to list
+        image_buckets.append(image_bucket)
+
+    comparison_end = time.time()
+    print()
+    print(f"--! Compared Images: {comparisons_made}, {str(timedelta(seconds=round(comparison_end - comparison_start, 3)))}")
 
     # Step 4: Generate report
     print()
-    print('Generating report', end='')
+    print('--- Generating Report', end='')
+    report_start = time.time()
 
     reports_generated = 0
-    generated_reports = set()
     doc = dominate.document(title='image-comparer report', )
+
+    # Render header
     with doc.head:
         script_path = os.path.join(os.path.dirname(__file__), "report-script.js")
         script_file = open(script_path, "r")
@@ -134,93 +201,51 @@ def main():
 
         meta(charset="UTF-8")
 
+    # Render body
     with doc:
         # Header
         h1("image-comparer Similarity Report")
 
         # Image similarity tables
-        for image, similar_images in images.items():
-            # Show progress
-            reports_generated += 1
-            if reports_generated % 10 == 0:
-                print('.', end='')
-
-            # Skip unique images
-            if len(similar_images) == 0:
+        for image_bucket in image_buckets:
+            # Skip unique images (ie, only itself in its bucket)
+            if len(image_bucket) == 1:
                 continue
 
-            # Skip sets we've seen before
-            comparison_set = list(x[0].path for x in similar_images)
-            comparison_set.append(image.path)
-            comparison_set.sort()
-            comparison_string = "".join(comparison_set)
-            if comparison_string in generated_reports:
-                continue
-            else:
-                generated_reports.add(comparison_string)
-
+            # Generate table for the bucket
             with table():
                 with tr():
                     th("Thumbnail")
-                    th("Path/Last Modified/Hash")
+                    th("Path/Last Modified")
                     th("Delete")
 
-                render_image(image, "Original")
-
-                for similar_image, hash_difference in similar_images:
-                    render_image(similar_image, hash_difference)
+                for image in image_bucket:
+                    render_image(image)
 
         # Script output
         div(id='emittedScript')
+
+        # Show progress
+        reports_generated += 1
+        if reports_generated % 10 == 0:
+            print('.', end='')
 
     report_filename = f'image-comparer-report_{datetime.now().strftime("%Y%m%d%H%M%S")}.html'
     report_file = open(report_filename, 'w', encoding='utf8')
     report_file.write(doc.render())
     report_file.close()
 
+    report_end = time.time()
     print()
-    print('Done!')
-    print(f'Output file is: {report_filename}')
+    print(f"--! Generated Report: {reports_generated}, {str(timedelta(seconds=round(report_end - report_start, 3)))}")
 
+    print()
+    print("------------------")
+    print(f'Output file is: {report_filename}')
     if len(invalid_paths) > 0:
         print('The following files were not processed:')
         for invalid_path in invalid_paths:
             print(f'    {invalid_path}')
-
-
-def render_image(image: HashedImage, score):
-    with tr():
-        # Image
-        if image.height > image.width:
-            image_style = 'height:200px; width:auto'
-        else:
-            image_style = 'height:auto; width:200px'
-
-        src = image.path.replace('\\', '/')
-        if not src.startswith('/'):
-            src = f'/{src}'
-        src = f'file://{src}'
-
-        td(img(src=src, style=image_style), style='width:200px;height:200px;text-align:center')
-
-        # Modified date
-        last_modified = datetime.fromtimestamp(image.last_modified).strftime("%Y-%m-%d %H:%M:%S")
-
-        # Path/Hash
-        with td():
-            p(image.path)
-            p(f'{image.width} x {image.height}, {last_modified}')
-            p(f'Score Difference: {score}')
-
-        # Delete button
-        escaped_path = image.path.replace('\\', '&#92;')
-        td(button("Delete", onClick=f'addFile(\'{escaped_path}\')'), style='width:100px;text-align:center')
-
-
-def print_usage():
-    print('Image comparer - compares all images in provided folders to find duplicates')
-    print('    python image-comparer.py path_to_folder [path_to_folder [path_to_folder...]]')
-
 
 # Run the program
 if __name__ == '__main__':

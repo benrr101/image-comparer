@@ -12,3 +12,24 @@ table {
     background-color: lightgrey;
     font-family: monospace;
 }
+
+.fixedHeight {
+    height:200px;
+    width:auto;
+}
+
+.fixedWidth {
+    height:auto;
+    width:200px;
+}
+
+.imgtd {
+    width: 200px;
+    height: 200px;
+    text-align: center;
+}
+
+.buttontd {
+    width:100px;
+    text-align:center;
+}
